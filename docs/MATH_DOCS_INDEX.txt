@@ -1,0 +1,182 @@
+================================================================================
+                      LEANSDR MATH.H DOCUMENTATION INDEX
+================================================================================
+
+OVERVIEW
+--------
+Comprehensive analysis of mathematical operations in LeanSDR for NEON 
+optimization on ARM platforms. Focus on complex number operations, lookup
+tables, and vectorization opportunities.
+
+FILES
+-----
+
+1. MATH_ANALYSIS_SUMMARY.txt (8.0 KB, 222 lines)
+   - Executive summary for quick reference
+   - Key findings and optimization priorities
+   - Compilation flags and speedup targets
+   - START HERE for quick overview
+
+2. MATH_ANALYSIS.md (16 KB, 544 lines)
+   - Detailed technical analysis
+   - Full code examples and explanations
+   - Memory footprint analysis
+   - Detailed NEON optimization strategies
+   - REFERENCE for deep technical details
+
+================================================================================
+SECTION BREAKDOWN
+================================================================================
+
+MATH_ANALYSIS_SUMMARY.txt:
+  1. Complex Number Operations (mult/add patterns)
+  2. Trigonometric Functions & Lookup Tables
+  3. Fixed-Point vs Floating-Point Strategy
+  4. Lookup Table Memory Footprint (~1.5 MB)
+  5. CORDIC Analysis (not used - why)
+  6. NEON Vectorization Opportunities
+  7. Compilation Flags for NEON
+  8. Critical Code Paths
+  9. Summary & Recommendations
+
+MATH_ANALYSIS.md:
+  1. Complex Number Operations (detailed)
+     - Basic structure, addition, multiplication
+     - Critical hot paths identified
+  
+  2. Trigonometric Functions (detailed)
+     - trig16 structure and usage
+     - Angle representation (16-bit fixed)
+     - Rotator design patterns
+     - Approximation quality
+  
+  3. Fixed-Point vs Floating-Point (detailed)
+     - u_angle and s_angle types
+     - Phase error quantization
+     - Constellation lookup strategy
+     - Hybrid input/output approach
+  
+  4. Lookup Tables (detailed)
+     - 6 types of LUTs with sizes
+     - Memory footprint breakdown
+     - Access patterns
+  
+  5. CORDIC/Algorithms (detailed)
+     - Why CORDIC not used
+     - Alternative algorithms (atan2f, FFT, etc.)
+     - Distance-based symbol detection
+  
+  6. Vectorization Opportunities (CRITICAL)
+     - 7 high-priority targets with speedup estimates
+     - 2 medium-priority targets
+     - 3 low-priority targets
+     - NEON intrinsic recommendations
+  
+  7. Compilation Flags
+  8. NEON Intrinsics Table
+  9. Summary & Recommendations
+
+================================================================================
+KEY FINDINGS
+================================================================================
+
+Complex Multiplication Hotspot:
+  - 4 multiplications + 2 additions per operation
+  - Heavy use in FFT butterflies
+  - NEON speedup potential: 2-4x
+
+Lookup Tables:
+  - Total: ~1.5 MB working set
+  - trig16: 256 KB (65536 entries)
+  - Constellation: 390 KB (256x256)
+  - Rotators: 512 KB (separate sin/cos)
+
+No CORDIC Implementation:
+  - Lookup tables preferred (O(1) access)
+  - Floating-point math libs used
+  - Smart design for FPU platforms
+
+Vectorization Opportunities:
+  - Conservative estimate: 1.5-2x with compiler flags
+  - With NEON optimization: 3-5x on DSP-heavy code
+  
+  CRITICAL (2-4x speedup):
+    1. FFT butterflies
+    2. Phase rotation
+    3. RMS power accumulation
+    4. Magnitude + min/max tracking
+
+Fixed-Point Strategy:
+  - Angles: 16-bit (u_angle, s_angle)
+  - Inputs: floating-point IQ
+  - Outputs: fixed-point metrics/phase
+  - Efficient for real-time processing
+
+================================================================================
+QUICK REFERENCE
+================================================================================
+
+Compilation for NEON:
+  Basic:     -march=armv7-a -mfpu=neon -O3
+  Better:    -march=armv7-a -mfpu=neon -O3 -ftree-vectorize
+  Aggressive: (above) -ffast-math (test carefully)
+
+Most Critical Optimizations:
+  1. Complex multiply in FFT (dsp.h:94-95)
+  2. Rotator loop (sdr.h:1246-1251)
+  3. RMS accumulation (sdr.h:176-183)
+
+Source Files Referenced:
+  - src/leansdr/math.h (116 lines - the subject)
+  - src/leansdr/sdr.h (complex types, FFT, rotator)
+  - src/leansdr/dsp.h (cfft_engine, complex ops)
+  - src/leansdr/framework.h (gen_sqrt, gen_abs, etc.)
+
+Expected Speedup Summary:
+  - With -ftree-vectorize: 1.5-2x
+  - With complex multiply NEON: +2-3x more
+  - With full optimization: 3-5x on DSP paths
+  - System-wide: 2-3x depending on workload
+
+================================================================================
+HOW TO USE THIS DOCUMENTATION
+================================================================================
+
+For Code Review:
+  1. Start with MATH_ANALYSIS_SUMMARY.txt (quick context)
+  2. Review Section 6 for vectorization targets
+  3. Check MATH_ANALYSIS.md Section 6.A for details
+
+For Implementation:
+  1. Read MATH_ANALYSIS.md Section 6 (all subsections)
+  2. Note NEON intrinsics in Section 8
+  3. Follow priority order in Section 9
+  4. Profile before/after on ARM target
+
+For Architecture Design:
+  1. Review Sections 1-5 in both files
+  2. Understand memory footprint (Section 4)
+  3. Note fixed-point strategy (Section 3)
+  4. Plan for ~1.5 MB LUT memory overhead
+
+For NEON Optimization:
+  1. Focus on MATH_ANALYSIS.md Section 6
+  2. Review compilation flags (Section 7)
+  3. Use NEON intrinsics table (Section 8)
+  4. Follow priority order (Section 9)
+
+================================================================================
+DOCUMENT GENERATION
+================================================================================
+
+Generated: 2025-11-17
+Source File: /home/user/leansdr/src/leansdr/math.h
+Analysis Scope: 
+  - Core math.h (116 lines)
+  - Usage in sdr.h, dsp.h (FFT, rotators, constellation)
+  - Helper functions in framework.h
+
+Total Documentation: 766 lines (544 + 222)
+Coverage: Complete mathematical operations and NEON optimization analysis
+
+================================================================================

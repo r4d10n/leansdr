@@ -1,0 +1,284 @@
+═══════════════════════════════════════════════════════════════════════════
+                  LEANDVB SIGNAL PROCESSING PIPELINE SUMMARY
+═══════════════════════════════════════════════════════════════════════════
+
+STANDARD MODE - Complete 20-Stage Pipeline:
+──────────────────────────────────────────────────────────────────────────
+
+1. INPUT CONVERSION           [I/O Bound]
+   STDIN → file_reader → cconverter → cf32 (float IQ)
+   Formats: u8/s8/u16/s16/f32
+   Buffer: 4096 * buf_factor samples
+
+2-3. OPTIONAL GUI SCOPES      [Display Only]
+   → cscope (constellation)
+   → spectrumscope (FFT)
+
+4. NOISE INJECTION            [Testing Only]
+   → wgn_c + adder → p_noisy
+
+5. AUTO-NOTCH FILTER          [CPU Intensive - SIMD Target]
+   → auto_notch<f32> → removes birdies
+   Buffer requirement: 4096 samples minimum
+   ★ PARALLELIZATION TARGET: Adaptive filter updates
+
+6. FREQUENCY DEROTATION       [Lightweight]
+   → rotator<f32> → frequency shift
+
+7. CNR ESTIMATION             [1Hz Updates]
+   → cnr_fft<f32> → carrier-to-noise ratio
+   Requires: Fs > 3*Fm
+
+8. SPECTRUM ANALYZER          [1Hz Updates]
+   → spectrum<f32> → 1024-bin FFT output
+
+9. RESAMPLING/DECIMATION      [BOTTLENECK - CPU Intensive]
+   Option A: fir_filter<cf32> → anti-aliasing + decimate
+             ★ PRIMARY PARALLELIZATION TARGET
+             - High-order FIR convolution
+             - NEON/SIMD vectorization: 4x speedup possible
+             - Multi-threading: Process blocks in parallel
+   
+   Option B: decimator<cf32> → fast but causes aliasing
+
+10. PREPROCESSED OUTPUT       [Optional]
+    → file_writer<cf32> → save intermediate data
+
+11. CONSTELLATION RECEIVER    [CORE DEMODULATOR - CPU Intensive]
+    → cstln_receiver<f32> → softsymbol decisions
+    Output channels:
+      - p_symbols (soft decisions for FEC)
+      - p_freq (carrier frequency estimate)
+      - p_ss (signal strength)
+      - p_mer (modulation error ratio)
+      - p_sampled (constellation points)
+    
+    Functions:
+      - Symbol timing recovery (Gardner/Mueller-Muller)
+      - Carrier phase tracking (Costas PLL)
+      - Soft-decision generation
+    
+    Sampler types:
+      - SAMP_NEAREST: Fastest
+      - SAMP_LINEAR: Balanced (default)
+      - SAMP_RRC: Best quality, CPU-intensive
+    
+    ★ PARALLELIZATION TARGET: Soft-decision calculations
+    Buffer: reads 128+1, writes 128/omega symbols
+
+12. TRACKING FEEDBACK         [Feedback Loop]
+    demod.freq_tap → r_resample (Doppler compensation)
+    demod.freq_tap → r_cnr (offset correction)
+
+13. DECONVOLUTION             [BOTTLENECK - CPU Intensive]
+    Option A: viterbi_sync → maximum likelihood
+              ★ MAJOR PARALLELIZATION TARGET
+              - SIMD branch metrics
+              - Parallel path updates
+              - 2-3x speedup possible
+    
+    Option B: deconvol_sync_simple → algebraic (faster)
+    
+    Alternative: HDLC mode (etr192_descrambler + hdlc_sync)
+    Buffer: 2048 * buf_factor bytes
+
+14. MPEG SYNCHRONIZATION      [Lightweight]
+    → mpeg_sync<u8> → find 0x47 sync pattern
+    Outputs: p_lock, p_locktime
+    Buffer: 2448 * buf_factor bytes
+
+15. DEINTERLEAVING            [Memory Bound]
+    → deinterleaver<u8> → undo Forney I=12
+    Reads: 17*11*12+204 = 2448 bytes
+
+16. REED-SOLOMON FEC          [Moderate CPU]
+    → rs_decoder<u8> → RS(204,188) error correction
+    Corrects up to 8 byte errors per packet
+    ★ PARALLELIZATION TARGET: Syndrome calculation
+
+17. BER ESTIMATION            [Statistics]
+    → rate_estimator<float> → Viterbi BER
+    Sample size: max(Fm/2, 50000) bits
+
+18. DERANDOMIZATION           [Lightweight]
+    → derandomizer → remove PRBS scrambling
+
+19. OUTPUT                    [I/O Bound]
+    → file_writer<tspacket> → STDOUT (188-byte packets)
+
+20. AUXILIARY OUTPUTS         [Monitoring]
+    → file_printer (FREQ, SS, MER, CNR, LOCK, VBER)
+    → file_carrayprinter (constellation symbols)
+    → file_vectorprinter (spectrum data)
+    → slowmultiscope (GUI timeline)
+
+──────────────────────────────────────────────────────────────────────────
+HIGH-SPEED MODE - Optimized 9-Stage Pipeline (QPSK FEC1/2 only):
+──────────────────────────────────────────────────────────────────────────
+
+STDIN (u8) → file_reader → fast_qpsk_receiver → dvb_deconvol_sync_hard
+  → mpeg_sync → deinterleaver → rs_decoder → derandomizer → STDOUT
+
+Key optimizations:
+  - No format conversion (direct u8 processing)
+  - No preprocessing (ANF, resampling, CNR)
+  - Fixed-point demodulator
+  - Hard-decision decoding
+  - ~2x faster than standard mode
+
+═══════════════════════════════════════════════════════════════════════════
+                        PARALLELIZATION STRATEGY
+═══════════════════════════════════════════════════════════════════════════
+
+PHASE 1: SIMD Vectorization (Quick Wins - 2x speedup)
+────────────────────────────────────────────────────
+Target files:
+  - src/leansdr/dsp.h: FIR filter (fir_filter<cf32>)
+  - src/leansdr/sdr.h: auto_notch, cstln_receiver
+  - src/leansdr/dvb.h: viterbi decoder
+
+Implementation:
+  - ARM NEON intrinsics: float32x4_t, vmulq_f32, vaddq_f32
+  - Process 4 complex samples per iteration
+  - Minimal code changes
+
+Expected: 2x speedup for --resample mode
+
+PHASE 2: Pipeline Parallelism (Major Speedup - 3x total)
+─────────────────────────────────────────────────────────
+Thread decomposition:
+
+  Thread 1 (I/O):        Input + Conversion
+  Thread 2 (CPU-Heavy):  Preprocessing (ANF + FIR filter)
+  Thread 3 (CPU-Heavy):  Demodulation (cstln_receiver)
+  Thread 4 (CPU-Heavy):  FEC (Viterbi + RS + Deinterleave)
+  Thread 5 (I/O):        Output + Monitoring
+
+Inter-thread communication:
+  - ThreadSafePipeBuf<T> with mutex or lock-free queue
+  - Blocking writes when full
+  - Backpressure propagation
+
+Implementation effort: 2-4 weeks
+
+Expected: 3x overall speedup on 4+ core systems
+
+PHASE 3: Advanced Optimizations (Incremental - +20%)
+─────────────────────────────────────────────────────
+  - Lock-free ring buffers (Boost.Lockfree)
+  - NUMA-aware thread pinning
+  - Adaptive buffering based on stage load
+  - Work stealing for dynamic load balancing
+
+═══════════════════════════════════════════════════════════════════════════
+                          THREAD ARCHITECTURE
+═══════════════════════════════════════════════════════════════════════════
+
+CURRENT: Single-threaded cooperative scheduler
+───────────────────────────────────────────────
+
+  while (hash_changing) {
+    for each runnable:
+      runnable->run()  // Process available data
+  }
+
+Advantages:
+  + Simple, deterministic, easy to debug
+  + No synchronization overhead
+  + Cache-friendly sequential access
+
+Disadvantages:
+  - Single-core only (no multi-core utilization)
+  - Pipeline stalls (slow stage blocks all)
+  - Cannot overlap I/O and compute
+
+PROPOSED: Multi-threaded pipeline
+───────────────────────────────────
+
+  ┌─────────┐   Queue   ┌──────────┐   Queue   ┌─────────┐
+  │ Thread1 │────────→  │ Thread2  │────────→  │ Thread3 │ ...
+  │ Input   │           │ Preproc  │           │ Demod   │
+  └─────────┘           └──────────┘           └─────────┘
+
+Advantages:
+  + Multi-core scaling (2-3x on 4 cores)
+  + Overlap I/O with compute
+  + Isolate slow stages
+
+Challenges:
+  - Thread-safe buffers needed
+  - Backpressure handling
+  - Termination signaling
+  - Non-deterministic execution
+
+═══════════════════════════════════════════════════════════════════════════
+                           BUFFER MANAGEMENT
+═══════════════════════════════════════════════════════════════════════════
+
+Default buffer sizes (buf_factor=4):
+  BUF_BASEBAND   = 16,384 samples  (cf32: 128 KiB)
+  BUF_SYMBOLS    =  4,096 symbols  (softsymbol: varies)
+  BUF_BYTES      =  8,192 bytes    (8 KiB)
+  BUF_MPEGBYTES  =  9,792 bytes    (~10 KiB)
+  BUF_PACKETS    =      4 packets  (752 bytes)
+  BUF_SLOW       =      4 samples  (16 bytes)
+
+Total memory: ~200 KiB default (scales with buf_factor)
+
+Buffer packing strategy:
+  - Circular buffer with multiple read pointers
+  - Pack (memmove) when approaching end
+  - Slowest reader determines pack point
+
+Input buffering:
+  --inbuf INT: Add extra input buffering for bursty I/O
+
+═══════════════════════════════════════════════════════════════════════════
+                        PERFORMANCE BOTTLENECKS
+═══════════════════════════════════════════════════════════════════════════
+
+Ranked by CPU impact (profiling recommended):
+
+1. FIR Resampler        - High-order convolution (100-200 taps typical)
+2. Viterbi Decoder      - ACS (Add-Compare-Select) operations
+3. Constellation Rx     - Timing recovery + PLL + interpolation
+4. Auto-Notch Filter    - Adaptive filter coefficient updates
+5. Reed-Solomon         - Syndrome calculation + error correction
+
+I/O is NOT a bottleneck - pipe I/O saturates at >100 MB/s
+
+═══════════════════════════════════════════════════════════════════════════
+                          KEY INSIGHTS
+═══════════════════════════════════════════════════════════════════════════
+
+1. CLEAN DATAFLOW ARCHITECTURE
+   - Well-defined component boundaries
+   - Explicit data dependencies
+   - Easy to reason about and extend
+
+2. SINGLE-THREADED SCHEDULER IS ELEGANT BUT LIMITING
+   - Fixpoint iteration is simple but sequential
+   - No parallelism exploitation
+   - Good for learning, not for performance
+
+3. PARALLELIZATION IS FEASIBLE
+   - Natural pipeline stages exist
+   - Limited data dependencies (mostly feed-forward)
+   - Some feedback (carrier tracking) but manageable
+
+4. SIMD IS LOW-HANGING FRUIT
+   - Many DSP loops are vectorizable
+   - Minimal code changes
+   - 2-4x speedup for compute-bound stages
+
+5. BUFFER MANAGEMENT IS WELL-DESIGNED
+   - Multiple readers supported
+   - Automatic packing
+   - Configurable sizing
+
+6. MONITORING IS COMPREHENSIVE
+   - Multiple quality metrics (MER, CNR, VBER)
+   - Constellation/spectrum output
+   - Lock status and timing
+
+═══════════════════════════════════════════════════════════════════════════

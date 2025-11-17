@@ -1,0 +1,222 @@
+================================================================================
+                  LeanSDR math.h - EXECUTIVE SUMMARY
+================================================================================
+
+FILE: src/leansdr/math.h (116 lines)
+
+================================================================================
+1. COMPLEX NUMBER OPERATIONS
+================================================================================
+
+Structure: template<typename T> struct complex { T re, im; }
+- Supports uint8, int16, float, etc. types
+- Operations: +, * (complex-complex, complex-scalar)
+- HOT PATHS: FFT butterflies, phase rotation, constellation decoding
+
+Critical Observation:
+  - Complex multiplication: 4 mults + 2 adds per operation
+  - Used repeatedly in FFT (Danielson-Lanczos)
+  - NEON OPPORTUNITY: 2-4x speedup with vectorization
+
+================================================================================
+2. TRIGONOMETRIC FUNCTIONS & APPROXIMATIONS
+================================================================================
+
+trig16 Structure (math.h:94-111):
+  - 65536-entry lookup table (256 KB)
+  - Maps 16-bit angle to e^(i*angle) = cos + i*sin
+  - Angular resolution: ~0.0055 degrees
+  - Pre-computed at initialization
+
+Unused Potential:
+  - No interpolation between table entries
+  - Could add linear interpolation for accuracy without much speed loss
+  - Currently used for phase calculations (atan2f), not rotations
+
+Note on Rotator (sdr.h:1229):
+  - SEPARATE sin/cos LUTs instead of using trig16
+  - 512 KB total (cos: 256 KB, sin: 256 KB)
+  - Optimized for sequential phase advancement
+
+================================================================================
+3. FIXED-POINT VS FLOATING-POINT
+================================================================================
+
+Hybrid Approach:
+
+Fixed-Point:
+  - Angle representation: u_angle (uint16_t) for [0,2π)
+  - Phase error: s_angle (int16_t) for [-π,π)
+  - Pre-computed metrics in constellation LUT
+  - Soft symbol distances as int16_t
+
+Floating-Point:
+  - Input signal processing (IQ samples)
+  - Trigonometric calculations (cosf, sinf, atan2f)
+  - RMS/power accumulation
+  - FFT operations
+
+Key Strategy:
+  - Inputs: float I/Q samples
+  - Processing: complex number ops (mixed types)
+  - Outputs: fixed-point metrics + phase errors
+  - Saves runtime atan2 calls via pre-computation
+
+================================================================================
+4. LOOKUP TABLES - MEMORY FOOTPRINT
+================================================================================
+
+Type              Count    Size/Entry   Total
+---------         --------  ----------   --------
+trig16            65536    8B (complex) 512 KB
+Constellation LUT 65536    6B (mixed)   390 KB
+Rotator cos       65536    4B (float)   256 KB
+Rotator sin       65536    4B (float)   256 KB
+FFT Twiddle (4K)  8192     8B (complex) 64 KB
+                                       -------
+                                       ~1.5 MB
+
+Total system working set dominated by lookup tables.
+
+Hamming Weight LUT (math.h:56-71):
+  - Only 16 entries (64 bytes)
+  - Clever 4-bit pattern table
+  - Used for bit population count
+
+Parity LUT (math.h:75):
+  - 1 byte (16-entry pattern encoded)
+  - Fast parity bit calculation
+
+================================================================================
+5. CORDIC - NOT USED
+================================================================================
+
+Analysis: Project avoids CORDIC entirely
+
+Reasoning:
+  1. Lookup tables provide O(1) access (better than CORDIC iterations)
+  2. Floating-point math libs (cosf, sinf) highly optimized
+  3. Simplicity over hardware-efficient rotations
+  4. Mobile platforms have good FPU performance
+
+Alternatives Actually Used:
+  - atan2f() for phase calculation (pre-computed in LUT)
+  - hypotf() for magnitude (sqrt(re² + im²))
+  - FFT via Danielson-Lanczos (in-place, pre-computed twiddles)
+  - Distance-squared symbol detection (no sqrt)
+
+================================================================================
+6. VECTORIZATION OPPORTUNITIES - NEON
+================================================================================
+
+CRITICAL (2-4x speedup each):
+  1. Complex Multiplication (FFT butterflies)
+     - math.h:40-53, dsp.h:94-95
+     - 4 mults + 2 adds → NEON 2-lane parallel
+     
+  2. Phase Rotation Loop (rotator)
+     - sdr.h:1246-1251
+     - Sequential rotation with cos/sin LUT access
+     - Batch processing could improve: 1.5-2x
+     
+  3. RMS Power Accumulation
+     - sdr.h:176-183
+     - Horizontal NEON adds for parallel accumulation: 3-4x
+     
+  4. Magnitude Squared Extraction + Min/Max
+     - sdr.h:216-220
+     - NEON min/max operations: 2-3x
+
+MEDIUM (auto-vectorizable):
+  5. Complex Scalar Multiplication (already compiler-friendly)
+     - sdr.h:266-269
+     
+  6. Constellation Distance Calculations
+     - sdr.h:540-542
+     - SIMD symbol comparison: 2-4x with architecture
+
+LOW (not worth effort):
+  7. Hamming weight / Parity (bit-level, limited parallelism)
+  8. FFT Bit-Reversal (memory-bound, random access)
+  9. Math lib calls (atan2, sqrt already optimized)
+
+================================================================================
+7. NEON COMPILATION & OPTIMIZATION FLAGS
+================================================================================
+
+Minimum:
+  -march=armv7-a -mfpu=neon -O3
+
+Better (enables auto-vectorization):
+  -march=armv7-a -mfpu=neon -O3 -ftree-vectorize
+
+Aggressive (trades precision for speed - test carefully):
+  -march=armv7-a -mfpu=neon -O3 -ftree-vectorize -ffast-math
+
+Note: -ffast-math may affect phase/timing-sensitive code (AGC, PLLs)
+
+Key NEON Instructions for This Code:
+  - vmulq_f32: 4-element float multiply
+  - vaddq_f32: 4-element float add
+  - vminq_f32, vmaxq_f32: parallel min/max
+  - vpaddl: horizontal add and narrow
+  - vrev64: shuffle for cross-multiplication
+
+================================================================================
+8. CRITICAL CODE PATHS FOR NEON OPTIMIZATION
+================================================================================
+
+Priority 1 (FFT Hot Path):
+  dsp.h:94-99 - Complex butterfly
+  Current: Scalar complex multiply + 4 adds
+  Target: NEON 2-pair parallel execution
+  Expected Speedup: 3-4x (if properly unrolled)
+
+Priority 2 (Phase Rotation):
+  sdr.h:1246-1251 - Rotator loop
+  Current: Sequential index-based rotation
+  Target: Batch multiple rotations in parallel
+  Expected Speedup: 2x (limited by phase continuity)
+
+Priority 3 (Power Estimation):
+  sdr.h:176-183 - RMS accumulation
+  Current: Scalar loop with final sqrt
+  Target: NEON parallel accumulation + horizontal add
+  Expected Speedup: 3-4x
+
+================================================================================
+9. SUMMARY & RECOMMENDATIONS
+================================================================================
+
+Strengths of Current Implementation:
+  ✓ Heavy use of O(1) lookup tables (smart for real-time)
+  ✓ Hybrid fixed-point/float approach
+  ✓ Avoids expensive operations (no sqrt in hot paths)
+  ✓ Pre-computed metrics eliminate runtime overhead
+
+Optimization Gaps:
+  ✗ No NEON intrinsics currently used
+  ✗ Complex multiplication not vectorized
+  ✗ Rotator phase advancement sequential
+  ✗ Power accumulation scalar loop
+
+Expected Speedup Targets:
+  - Conservative (compiler flags): 1.5-2x
+  - With NEON optimization: 3-5x on DSP-heavy code
+  - Total system impact: 2-3x (depends on workload)
+
+Recommended Priority for NEON Conversion:
+  1. FFT butterflies (highest impact)
+  2. Phase rotation (common use case)
+  3. RMS/power accumulation (signal monitoring)
+  4. Constellation decoding (symbol detection)
+  5. Magnitude tracking (AGC feedback)
+
+Next Steps:
+  1. Profile on ARM NEON target (ARMv7)
+  2. Enable -ftree-vectorize and measure
+  3. Implement NEON for complex multiply in FFT
+  4. Optimize rotator with batch processing
+  5. Consider NEON intrinsics for constellation LUT access
+
+================================================================================
