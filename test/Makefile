@@ -57,36 +57,56 @@ TARGET = test_neon
 SOURCES = test_neon.cc
 OBJECTS = $(SOURCES:.cc=.o)
 
+# Reed-Solomon NEON test
+TARGET_RS = test_rs_neon
+SOURCES_RS = test_rs_neon.cc
+OBJECTS_RS = $(SOURCES_RS:.cc=.o)
+
 # Benchmark targets
 BENCH_SCALAR = benchmark_neon_scalar
 BENCH_NEON = benchmark_neon_neon
 BENCH_SOURCE = benchmark_neon.cc
 
-.PHONY: all clean test run benchmark bench-build bench-run bench-all help
+.PHONY: all clean test run benchmark bench-build bench-run bench-all help test-rs e2e-test e2e-fast e2e-stress e2e-all
 
-all: $(TARGET)
+all: $(TARGET) $(TARGET_RS)
 	@echo ""
-	@echo "Build complete: $(TARGET)"
+	@echo "Build complete: $(TARGET) $(TARGET_RS)"
 	@if [ "$(HAVE_NEON)" = "1" ]; then \
 		echo "NEON optimizations: ENABLED"; \
 	else \
 		echo "NEON optimizations: DISABLED (scalar only)"; \
 	fi
 	@echo ""
-	@echo "Run 'make test' to execute tests"
-	@echo "Run 'make benchmark' for performance tests only"
+	@echo "Run 'make test' to execute all tests"
+	@echo "Run 'make test-rs' to execute Reed-Solomon tests only"
+	@echo "Run 'make benchmark' for performance tests"
 
 $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+$(TARGET_RS): $(OBJECTS_RS)
+	$(CXX) $(CXXFLAGS) -I../src -o $@ $^ $(LDFLAGS)
+
 %.o: %.cc
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-test: $(TARGET)
+test: $(TARGET) $(TARGET_RS)
 	@echo "========================================="
 	@echo "Running NEON optimization tests..."
 	@echo "========================================="
 	./$(TARGET)
+	@echo ""
+	@echo "========================================="
+	@echo "Running Reed-Solomon NEON tests..."
+	@echo "========================================="
+	./$(TARGET_RS)
+
+test-rs: $(TARGET_RS)
+	@echo "========================================="
+	@echo "Running Reed-Solomon NEON tests..."
+	@echo "========================================="
+	./$(TARGET_RS)
 
 run: test
 
@@ -173,8 +193,37 @@ bench-run: bench-build
 bench-all: bench-run
 
 clean:
-	rm -f $(OBJECTS) $(TARGET) test_neon.s *.o
+	rm -f $(OBJECTS) $(TARGET) $(OBJECTS_RS) $(TARGET_RS) test_neon.s *.o
 	rm -f $(BENCH_SCALAR) $(BENCH_NEON)
+
+# End-to-End Integration Tests
+e2e-test:
+	@echo "========================================="
+	@echo "Running E2E NEON Integration Test"
+	@echo "========================================="
+	./test_e2e_neon.sh default
+
+e2e-fast:
+	@echo "========================================="
+	@echo "Running E2E Fast Test"
+	@echo "========================================="
+	./test_e2e_neon.sh fast
+
+e2e-stress:
+	@echo "========================================="
+	@echo "Running E2E Stress Test"
+	@echo "========================================="
+	./test_e2e_neon.sh stress
+
+e2e-all:
+	@echo "========================================="
+	@echo "Running All E2E Tests"
+	@echo "========================================="
+	@for test in fast default stress; do \
+		echo ""; \
+		echo "=== Running E2E test: $$test ==="; \
+		./test_e2e_neon.sh $$test || exit 1; \
+	done
 
 help:
 	@echo "LeanSDR NEON Test Suite - Build Targets"
@@ -182,6 +231,7 @@ help:
 	@echo "Unit Tests:"
 	@echo "  make              - Build test suite with default settings"
 	@echo "  make test         - Build and run all tests"
+	@echo "  make test-rs      - Build and run Reed-Solomon tests only"
 	@echo "  make benchmark    - Run performance benchmarks"
 	@echo "  make release      - Build optimized release version (-O3)"
 	@echo "  make scalar       - Build without NEON (scalar fallback only)"
@@ -204,8 +254,15 @@ help:
 	@echo "  DISABLE_NEON=1    - Force disable NEON"
 	@echo "  VERBOSE=1         - Verbose compiler output"
 	@echo ""
+	@echo "End-to-End Integration Tests:"
+	@echo "  make e2e-fast     - Quick E2E test (~15s, for development)"
+	@echo "  make e2e-test     - Standard E2E test (~30s, default)"
+	@echo "  make e2e-stress   - Stress test (~2min, high symbol rate)"
+	@echo "  make e2e-all      - Run all E2E test scenarios"
+	@echo ""
 	@echo "Examples:"
 	@echo "  make test                    # Build and run unit tests"
+	@echo "  make e2e-test                # Run end-to-end integration test"
 	@echo "  make bench-run               # Run micro-benchmarks"
 	@echo "  make DEBUG=1 test            # Debug build"
 	@echo "  make DISABLE_NEON=1 test     # Test scalar fallback"

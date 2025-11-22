@@ -1,0 +1,239 @@
+# Makefile for LeanSDR NEON FFT Optimization
+# Copyright (C) 2016-2025 <pabr@pabr.org>
+
+CXX = g++
+CXXFLAGS = -Wall -O2 -std=c++11 -I./src
+LDFLAGS = -lm
+
+# Detect ARM architecture and enable NEON if available
+ARCH := $(shell uname -m)
+
+ifeq ($(ARCH),armv7l)
+    # ARMv7 with NEON
+    CXXFLAGS += -march=armv7-a -mfpu=neon -mfloat-abi=hard
+    HAVE_NEON = 1
+endif
+
+ifeq ($(ARCH),aarch64)
+    # ARMv8 (64-bit) - NEON is standard
+    CXXFLAGS += -march=armv8-a
+    HAVE_NEON = 1
+endif
+
+# Allow manual override for NEON
+ifdef ENABLE_NEON
+    CXXFLAGS += -mfpu=neon -march=armv7-a
+    HAVE_NEON = 1
+endif
+
+# Ne10 library support (optional, provides best performance)
+ifdef USE_NE10
+    CXXFLAGS += -DLEANSDR_USE_NE10
+    LDFLAGS += -lNE10
+    HAVE_NE10 = 1
+endif
+
+# Optimization flags
+ifdef RELEASE
+    CXXFLAGS := $(filter-out -O2,$(CXXFLAGS))
+    CXXFLAGS += -O3 -ffast-math -funroll-loops -ftree-vectorize
+endif
+
+ifdef DEBUG
+    CXXFLAGS := $(filter-out -O2,$(CXXFLAGS))
+    CXXFLAGS += -g -O0 -DDEBUG
+endif
+
+# Targets
+TARGET = test_fft_neon
+SOURCES = test_fft_neon.cpp
+OBJECTS = $(SOURCES:.cpp=.o)
+
+.PHONY: all clean test run benchmark help check-neon install
+
+all: $(TARGET)
+	@echo ""
+	@echo "======================================================================"
+	@echo "Build complete: $(TARGET)"
+	@echo "======================================================================"
+	@if [ "$(HAVE_NEON)" = "1" ]; then \
+		echo "NEON optimizations: ENABLED"; \
+	else \
+		echo "NEON optimizations: DISABLED (scalar fallback)"; \
+	fi
+	@if [ "$(HAVE_NE10)" = "1" ]; then \
+		echo "Ne10 library:       ENABLED (best performance)"; \
+	else \
+		echo "Ne10 library:       DISABLED"; \
+	fi
+	@echo ""
+	@echo "Run 'make test' to execute correctness tests"
+	@echo "Run 'make benchmark' for performance measurements"
+	@echo "Run 'make help' for more options"
+	@echo "======================================================================"
+
+$(TARGET): $(OBJECTS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+# Run tests (quick verification)
+test: $(TARGET)
+	@echo "======================================================================"
+	@echo "Running NEON FFT tests..."
+	@echo "======================================================================"
+	./$(TARGET) 1024 1000
+	@echo ""
+	@echo "Quick test complete!"
+
+# Run comprehensive benchmark
+benchmark: $(TARGET)
+	@echo "======================================================================"
+	@echo "Running comprehensive FFT benchmark..."
+	@echo "======================================================================"
+	./$(TARGET) 1024 10000
+	@echo ""
+	@echo "Benchmark complete!"
+
+# Quick benchmark with default settings
+run: test
+
+# Release build with maximum optimization
+release:
+	$(MAKE) -f Makefile.fft_neon clean
+	$(MAKE) -f Makefile.fft_neon RELEASE=1 all
+
+# Build with Ne10 library (best performance)
+ne10:
+	$(MAKE) -f Makefile.fft_neon clean
+	$(MAKE) -f Makefile.fft_neon USE_NE10=1 RELEASE=1 all
+
+# Cross-compile for ARM from x86
+cross-arm:
+	$(MAKE) -f Makefile.fft_neon clean
+	$(MAKE) -f Makefile.fft_neon CXX=arm-linux-gnueabihf-g++ \
+	        CXXFLAGS="-Wall -O3 -std=c++11 -I./src -march=armv7-a -mfpu=neon -mfloat-abi=hard" \
+	        ENABLE_NEON=1 all
+
+# Cross-compile with Ne10
+cross-arm-ne10:
+	$(MAKE) -f Makefile.fft_neon clean
+	$(MAKE) -f Makefile.fft_neon CXX=arm-linux-gnueabihf-g++ \
+	        CXXFLAGS="-Wall -O3 -std=c++11 -I./src -march=armv7-a -mfpu=neon -mfloat-abi=hard -DLEANSDR_USE_NE10" \
+	        LDFLAGS="-lm -lNE10" \
+	        ENABLE_NEON=1 USE_NE10=1 all
+
+# Build scalar-only version (no NEON, for comparison)
+scalar:
+	$(MAKE) -f Makefile.fft_neon clean
+	$(MAKE) -f Makefile.fft_neon all
+
+# Generate assembly output to verify NEON usage
+asm: test_fft_neon.cpp
+	$(CXX) $(CXXFLAGS) -S -fverbose-asm -o test_fft_neon.s $<
+	@echo ""
+	@echo "Assembly output written to: test_fft_neon.s"
+	@echo "Look for NEON instructions:"
+	@echo "  - vld1, vld2, vst1, vst2   (NEON load/store)"
+	@echo "  - vmul, vadd, vsub         (NEON arithmetic)"
+	@echo "  - vmla, vmls               (NEON multiply-accumulate)"
+
+# Check if binary contains NEON instructions
+check-neon: $(TARGET)
+	@echo "======================================================================"
+	@echo "Checking for NEON instructions in binary..."
+	@echo "======================================================================"
+	@if command -v objdump >/dev/null 2>&1; then \
+		echo "Sample NEON instructions found:"; \
+		objdump -d $(TARGET) | grep -E 'vld|vst|vmul|vadd|vmla' | head -10; \
+		count=$$(objdump -d $(TARGET) | grep -E 'vld|vst|vmul|vadd|vmla|vsub' | wc -l); \
+		echo ""; \
+		echo "Total NEON instructions: $$count"; \
+		if [ $$count -gt 10 ]; then \
+			echo "✓ NEON optimizations are present and active"; \
+		else \
+			echo "✗ Few or no NEON instructions found (using scalar fallback)"; \
+		fi \
+	else \
+		echo "objdump not available, cannot verify NEON instructions"; \
+	fi
+	@echo "======================================================================"
+
+# Install Ne10 library (Debian/Ubuntu)
+install-ne10:
+	@echo "Installing Ne10 library..."
+	@if command -v apt-get >/dev/null 2>&1; then \
+		sudo apt-get update && sudo apt-get install -y libne10-dev; \
+		echo "✓ Ne10 library installed"; \
+	else \
+		echo "apt-get not found. Please install Ne10 manually:"; \
+		echo "  git clone https://github.com/projectNe10/Ne10.git"; \
+		echo "  cd Ne10 && mkdir build && cd build"; \
+		echo "  cmake -DGNULINUX_PLATFORM=ON .."; \
+		echo "  make && sudo make install"; \
+	fi
+
+# Performance comparison across all configurations
+compare: scalar release ne10
+	@echo "======================================================================"
+	@echo "Performance Comparison"
+	@echo "======================================================================"
+	@echo ""
+	@echo "1. Scalar (baseline):"
+	@make -f Makefile.fft_neon scalar test
+	@echo ""
+	@echo "2. NEON optimized:"
+	@make -f Makefile.fft_neon release test
+	@if [ "$(HAVE_NE10)" = "1" ]; then \
+		echo ""; \
+		echo "3. Ne10 library:"; \
+		make -f Makefile.fft_neon ne10 test; \
+	fi
+
+clean:
+	rm -f $(OBJECTS) $(TARGET) test_fft_neon.s *.o
+
+help:
+	@echo "======================================================================"
+	@echo "LeanSDR NEON FFT Optimization - Build Targets"
+	@echo "======================================================================"
+	@echo ""
+	@echo "Basic Targets:"
+	@echo "  make -f Makefile.fft_neon              # Build with auto-detection"
+	@echo "  make -f Makefile.fft_neon test         # Build and run quick tests"
+	@echo "  make -f Makefile.fft_neon benchmark    # Run comprehensive benchmark"
+	@echo "  make -f Makefile.fft_neon release      # Build with -O3 optimization"
+	@echo "  make -f Makefile.fft_neon ne10         # Build with Ne10 library"
+	@echo "  make -f Makefile.fft_neon scalar       # Build scalar-only version"
+	@echo ""
+	@echo "Cross-Compilation:"
+	@echo "  make -f Makefile.fft_neon cross-arm       # Cross-compile for ARM"
+	@echo "  make -f Makefile.fft_neon cross-arm-ne10  # Cross-compile with Ne10"
+	@echo ""
+	@echo "Development:"
+	@echo "  make -f Makefile.fft_neon asm          # Generate assembly output"
+	@echo "  make -f Makefile.fft_neon check-neon   # Verify NEON instructions"
+	@echo "  make -f Makefile.fft_neon compare      # Compare all configurations"
+	@echo ""
+	@echo "Installation:"
+	@echo "  make -f Makefile.fft_neon install-ne10 # Install Ne10 library"
+	@echo ""
+	@echo "Cleanup:"
+	@echo "  make -f Makefile.fft_neon clean        # Remove build artifacts"
+	@echo ""
+	@echo "Environment Variables:"
+	@echo "  DEBUG=1           # Build with debug symbols"
+	@echo "  ENABLE_NEON=1     # Force enable NEON (for cross-compile)"
+	@echo "  USE_NE10=1        # Enable Ne10 library"
+	@echo "  RELEASE=1         # Maximum optimization"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make -f Makefile.fft_neon test                    # Quick test"
+	@echo "  make -f Makefile.fft_neon RELEASE=1 benchmark     # Optimized benchmark"
+	@echo "  make -f Makefile.fft_neon USE_NE10=1 release      # Best performance"
+	@echo "  make -f Makefile.fft_neon cross-arm               # For Raspberry Pi"
+	@echo "======================================================================"
+	@echo ""
+	@echo "For more information, see: NEON_FFT_OPTIMIZATION.md"
+	@echo ""

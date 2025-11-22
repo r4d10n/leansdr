@@ -16,6 +16,10 @@ APPS	+= leandvbtx leandvb
 APPS	+= leansdrscan leansdrserv
 APPS	+= leantsgen leansdrcat leanchansim
 
+# NEON-optimized applications (built on ARM platforms)
+APPS_NEON	=
+APPS_NEON	+= leandvb_neon
+
 
 # leanmlmrx requires fftw3 and pthread.
 ifneq "$(wildcard /usr/include/fftw3.h)" ""
@@ -54,11 +58,21 @@ DEPS	= ../leansdr/*.h
 %:	%.cc $(DEPS)
 	g++ $(CXXFLAGS) $(CXXFLAGS_GUI) $< $(LDFLAGS) $(LDFLAGS_GUI) -o $@
 
-native::	$(APPS)
+# Build NEON-optimized applications (always build, but only use NEON on ARM)
+%_neon:	%_neon.cc $(DEPS)
+	@if [ "$(IS_ARM)" = "yes" ]; then \
+		echo "Building $@ with NEON optimizations..."; \
+		g++ $(CXXFLAGS) $(CPU_FLAGS) $(CXXFLAGS_GUI) $< $(LDFLAGS) $(LDFLAGS_GUI) -o $@; \
+	else \
+		echo "Building $@ (NEON disabled on non-ARM platform)..."; \
+		g++ $(CXXFLAGS) $(CXXFLAGS_GUI) $< $(LDFLAGS) $(LDFLAGS_GUI) -o $@; \
+	fi
+
+native::	$(APPS) $(APPS_NEON)
 	@echo "Now 'make embedded' to also build static binaries."
 
 clean::
-	rm -f $(APPS)
+	rm -f $(APPS) $(APPS_NEON)
 
 ##### CPU-specific flags for embedded platforms.
 
@@ -155,9 +169,11 @@ benchmark_neon:
 
 # Enhanced clean targets
 clean::
-	rm -f $(APPS)
+	rm -f $(APPS) $(APPS_NEON)
 	rm -f $(APPS:%=%.debug)
 	rm -f $(APPS:%=%.debug-neon)
+	rm -f $(APPS_NEON:%=%.debug)
+	rm -f $(APPS_NEON:%=%.debug-neon)
 	rm -f test_neon benchmark_neon
 	rm -f *.o *.a
 
@@ -169,6 +185,7 @@ clean-all: clean
 help:
 	@echo "Available targets for NEON/ARM compilation:"
 	@echo "  native          - Build for native platform (x86/x64 scalar or ARM)"
+	@echo "                    Includes: $(APPS) $(APPS_NEON)"
 	@echo "  embedded        - Build static binaries for current ARM architecture"
 	@echo "  debug           - Build with debug symbols (NEON disabled)"
 	@echo "  debug-neon      - Build with debug symbols and NEON enabled (ARM only)"
@@ -176,6 +193,10 @@ help:
 	@echo "  benchmark_neon  - Build and run NEON benchmarks"
 	@echo "  clean           - Remove built binaries"
 	@echo "  clean-all       - Remove all built binaries and architecture-specific files"
+	@echo ""
+	@echo "NEON-optimized applications:"
+	@echo "  leandvb_neon    - DVB-S demodulator with NEON SIMD optimizations"
+	@echo "                    Use --neon flag to enable, --perf-report for stats"
 	@echo ""
 	@echo "Detected architecture: $(ARCH)"
 	@echo "Architecture type: $(ARCH_TYPE)"
